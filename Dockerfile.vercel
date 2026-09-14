@@ -19,7 +19,7 @@ RUN composer install \
     --no-interaction \
     --prefer-dist
 
-RUN php artisan optimize
+RUN chown -R www-data:www-data storage bootstrap/cache
 
 ENV SERVER_NAME=:80
 
