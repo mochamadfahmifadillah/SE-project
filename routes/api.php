@@ -137,12 +137,21 @@ Route::prefix('v1')->group(function () {
         |--------------------------------------------------------------------------
         | Current User
         |--------------------------------------------------------------------------
+        |
+        | GET   /api/v1/me
+        | PATCH /api/v1/me
+        |
         */
 
         Route::get('/me', [
             AuthController::class,
             'me',
         ])->name('auth.me');
+
+        Route::patch('/me', [
+            AuthController::class,
+            'updateProfile',
+        ])->name('auth.profile.update');
 
         Route::post('/logout', [
             AuthController::class,
@@ -272,20 +281,6 @@ Route::prefix('v1')->group(function () {
                 |--------------------------------------------------------------------------
                 | Analytics
                 |--------------------------------------------------------------------------
-                |
-                | GET /api/v1/admin/analytics
-                |
-                | Digunakan oleh Admin Portal untuk:
-                |
-                | - Total software
-                | - Total users
-                | - Total reviews
-                | - Total implementation requests
-                | - Total vendors
-                | - Total partners
-                | - Total articles
-                | - Total comparisons
-                |
                 */
 
                 Route::get('/analytics', [
@@ -300,21 +295,6 @@ Route::prefix('v1')->group(function () {
                 |--------------------------------------------------------------------------
                 | Settings
                 |--------------------------------------------------------------------------
-                |
-                | GET /api/v1/admin/settings
-                | PUT /api/v1/admin/settings
-                |
-                | Digunakan oleh Admin Portal untuk:
-                |
-                | - Platform name
-                | - Platform URL
-                | - Platform email
-                | - Timezone
-                | - Maintenance mode
-                | - Email notifications
-                | - Review notifications
-                | - Lead notifications
-                |
                 */
 
                 Route::get('/settings', [
@@ -392,10 +372,6 @@ Route::prefix('v1')->group(function () {
                 |--------------------------------------------------------------------------
                 | Audit Logs
                 |--------------------------------------------------------------------------
-                |
-                | GET /api/v1/admin/audit-logs
-                | GET /api/v1/admin/audit-logs/{id}
-                |
                 */
 
                 Route::get('/audit-logs', [

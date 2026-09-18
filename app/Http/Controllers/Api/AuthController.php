@@ -184,4 +184,47 @@ class AuthController extends Controller
             ],
         ]);
     }
+
+    /**
+     * PATCH /api/v1/me
+     *
+     * Update authenticated user's profile.
+     */
+    public function updateProfile(Request $request): JsonResponse
+    {
+        $user = $request->user();
+
+        $validated = $request->validate([
+            'name' => ['required', 'string', 'max:255'],
+            'phone' => ['nullable', 'string', 'max:30'],
+            'job_title' => ['nullable', 'string', 'max:255'],
+            'location' => ['nullable', 'string', 'max:255'],
+            'company' => ['nullable', 'string', 'max:255'],
+            'business_size' => ['nullable', 'string', 'max:100'],
+            'industry' => ['nullable', 'string', 'max:255'],
+            'business_need' => ['nullable', 'string', 'max:255'],
+            'bio' => ['nullable', 'string', 'max:1000'],
+            'avatar' => ['nullable', 'string', 'max:2048'],
+        ]);
+
+        $user->update($validated);
+
+        /*
+        |--------------------------------------------------------------------------
+        | Reload User Data
+        |--------------------------------------------------------------------------
+        */
+
+        $user->load([
+            'roles.permissions',
+        ]);
+
+        return response()->json([
+            'success' => true,
+            'message' => 'Profile updated successfully.',
+            'data' => [
+                'user' => $user,
+            ],
+        ]);
+    }
 }

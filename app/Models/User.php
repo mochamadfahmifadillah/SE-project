@@ -16,6 +16,15 @@ use Laravel\Sanctum\HasApiTokens;
     'name',
     'email',
     'password',
+    'phone',
+    'job_title',
+    'location',
+    'company',
+    'business_size',
+    'industry',
+    'business_need',
+    'bio',
+    'avatar',
 ])]
 #[Hidden([
     'password',
