@@ -27,39 +27,23 @@ class Software extends Model
         'is_active' => 'boolean',
     ];
 
-    /*
-    |--------------------------------------------------------------------------
-    | Reviews
-    |--------------------------------------------------------------------------
-    */
-
-    /**
-     * Software reviews.
-     */
     public function reviews(): HasMany
     {
         return $this->hasMany(Review::class);
     }
 
-    /*
-    |--------------------------------------------------------------------------
-    | Integrations
-    |--------------------------------------------------------------------------
-    */
+    public function integrations(): HasMany
+    {
+        return $this->hasMany(Integrations::class, 'software_id');
+    }
 
-    /**
-     * Software integrations.
-     *
-     * Requires a pivot table such as:
-     * software_integration
-     */
-    public function integrations(): BelongsToMany
+    public function features(): BelongsToMany
     {
         return $this->belongsToMany(
-            Integration::class,
-            'software_integration',
+            SoftwareFeature::class,
+            'software_feature_map',
             'software_id',
-            'integration_id'
-        );
+            'software_feature_id'
+        )->withTimestamps();
     }
 }

@@ -24,25 +24,48 @@ class CompareController extends Controller
             ->latest()
             ->get();
 
-        $data = $comparisons->map(function (Comparison $comparison) {
-            $softwareIds = is_array($comparison->software_ids)
-                ? $comparison->software_ids
-                : [];
+        $data = $comparisons->map(
+            function (Comparison $comparison) {
+                $softwareIds = is_array($comparison->software_ids)
+                    ? $comparison->software_ids
+                    : [];
 
-            $software = Software::query()
-                ->whereIn('id', $softwareIds)
-                ->where('is_active', true)
-                ->get();
+                $softwareById = Software::query()
+                    ->with([
+                        'features' => function ($query) {
+                            $query->where(
+                                'software_features.is_active',
+                                true
+                            );
+                        },
+                        'integrations' => function ($query) {
+                            $query->where(
+                                'integrations.is_active',
+                                true
+                            );
+                        },
+                    ])
+                    ->whereIn('id', $softwareIds)
+                    ->where('is_active', true)
+                    ->get()
+                    ->keyBy('id');
 
-            return [
-                'id' => $comparison->id,
-                'name' => $comparison->name,
-                'software_ids' => $softwareIds,
-                'software' => $software,
-                'created_at' => $comparison->created_at,
-                'updated_at' => $comparison->updated_at,
-            ];
-        });
+                // Pertahankan urutan software yang disimpan.
+                $software = collect($softwareIds)
+                    ->map(fn ($id) => $softwareById->get($id))
+                    ->filter()
+                    ->values();
+
+                return [
+                    'id' => $comparison->id,
+                    'name' => $comparison->name,
+                    'software_ids' => $softwareIds,
+                    'software' => $software,
+                    'created_at' => $comparison->created_at,
+                    'updated_at' => $comparison->updated_at,
+                ];
+            }
+        );
 
         return response()->json([
             'success' => true,
@@ -64,13 +87,12 @@ class CompareController extends Controller
                 'min:2',
                 'max:3',
             ],
-
             'software_ids.*' => [
+                'required',
                 'integer',
                 'distinct',
                 'exists:software,id',
             ],
-
             'name' => [
                 'nullable',
                 'string',
@@ -79,44 +101,46 @@ class CompareController extends Controller
         ]);
 
         $user = $request->user();
-
         $softwareIds = $validated['software_ids'];
 
-        /*
-        |--------------------------------------------------------------------------
-        | Make sure selected software is active
-        |--------------------------------------------------------------------------
-        */
-
-        $software = Software::query()
+        $softwareById = Software::query()
+            ->with([
+                'features' => function ($query) {
+                    $query->where(
+                        'software_features.is_active',
+                        true
+                    );
+                },
+                'integrations' => function ($query) {
+                    $query->where(
+                        'integrations.is_active',
+                        true
+                    );
+                },
+            ])
             ->whereIn('id', $softwareIds)
             ->where('is_active', true)
-            ->get();
+            ->get()
+            ->keyBy('id');
 
-        if ($software->count() < 2) {
+        // Semua ID yang dipilih wajib mengarah ke software aktif.
+        if ($softwareById->count() !== count($softwareIds)) {
             return response()->json([
                 'success' => false,
-                'message' => 'At least two active software products are required.',
+                'message' => 'All selected software products must be active.',
             ], 422);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Create comparison
-        |--------------------------------------------------------------------------
-        */
+        // Pertahankan urutan sesuai pilihan pengguna.
+        $software = collect($softwareIds)
+            ->map(fn ($id) => $softwareById->get($id))
+            ->values();
 
         $comparison = Comparison::create([
             'user_id' => $user->id,
             'software_ids' => $softwareIds,
             'name' => $validated['name'] ?? null,
         ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Response
-        |--------------------------------------------------------------------------
-        */
 
         return response()->json([
             'success' => true,
