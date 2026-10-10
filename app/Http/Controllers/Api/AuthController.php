@@ -8,6 +8,7 @@ use App\Models\User;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
 
 class AuthController extends Controller
@@ -31,15 +32,7 @@ class AuthController extends Controller
             'password' => $validated['password'],
         ]);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Assign Default Role
-        |--------------------------------------------------------------------------
-        |
-        | Every newly registered user receives the "user" role.
-        |
-        */
-
+        // Assign the default user role.
         $userRole = Role::where('name', 'user')->first();
 
         if ($userRole) {
@@ -48,21 +41,7 @@ class AuthController extends Controller
             ]);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Load RBAC
-        |--------------------------------------------------------------------------
-        */
-
-        $user->load([
-            'roles.permissions',
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Create Token
-        |--------------------------------------------------------------------------
-        */
+        $user->load(['roles.permissions']);
 
         $token = $user
             ->createToken('software-empire')
@@ -81,7 +60,7 @@ class AuthController extends Controller
     /**
      * POST /api/v1/login
      *
-     * Login user and create a new access token.
+     * Authenticate a user and create an access token.
      */
     public function login(Request $request): JsonResponse
     {
@@ -96,10 +75,7 @@ class AuthController extends Controller
 
         if (
             !$user ||
-            !Hash::check(
-                $validated['password'],
-                $user->password
-            )
+            !Hash::check($validated['password'], $user->password)
         ) {
             throw ValidationException::withMessages([
                 'email' => [
@@ -108,29 +84,10 @@ class AuthController extends Controller
             ]);
         }
 
-        /*
-        |--------------------------------------------------------------------------
-        | Invalidate Previous Tokens
-        |--------------------------------------------------------------------------
-        */
-
+        // Invalidate previous access tokens.
         $user->tokens()->delete();
 
-        /*
-        |--------------------------------------------------------------------------
-        | Load RBAC
-        |--------------------------------------------------------------------------
-        */
-
-        $user->load([
-            'roles.permissions',
-        ]);
-
-        /*
-        |--------------------------------------------------------------------------
-        | Create Token
-        |--------------------------------------------------------------------------
-        */
+        $user->load(['roles.permissions']);
 
         $token = $user
             ->createToken('software-empire')
@@ -167,15 +124,13 @@ class AuthController extends Controller
     /**
      * GET /api/v1/me
      *
-     * Get authenticated user with roles and permissions.
+     * Return the authenticated user with roles and permissions.
      */
     public function me(Request $request): JsonResponse
     {
         $user = $request->user();
 
-        $user->load([
-            'roles.permissions',
-        ]);
+        $user->load(['roles.permissions']);
 
         return response()->json([
             'success' => true,
@@ -188,7 +143,10 @@ class AuthController extends Controller
     /**
      * PATCH /api/v1/me
      *
-     * Update authenticated user's profile.
+     * Update profile details and optionally upload a profile avatar.
+     *
+     * Avatar files are stored on Laravel's public disk.
+     * The database stores a relative path, e.g. avatars/example.jpg.
      */
     public function updateProfile(Request $request): JsonResponse
     {
@@ -204,20 +162,64 @@ class AuthController extends Controller
             'industry' => ['nullable', 'string', 'max:255'],
             'business_need' => ['nullable', 'string', 'max:255'],
             'bio' => ['nullable', 'string', 'max:1000'],
-            'avatar' => ['nullable', 'string', 'max:2048'],
+            'avatar' => [
+                'sometimes',
+                'nullable',
+                'image',
+                'mimes:jpg,jpeg,png,gif,webp',
+                'max:2048',
+            ],
         ]);
 
-        $user->update($validated);
+        // Keep the current avatar unless a new file is uploaded.
+        unset($validated['avatar']);
 
-        /*
-        |--------------------------------------------------------------------------
-        | Reload User Data
-        |--------------------------------------------------------------------------
-        */
+        $oldAvatar = $user->avatar;
+        $newAvatarPath = null;
 
-        $user->load([
-            'roles.permissions',
-        ]);
+        if ($request->hasFile('avatar')) {
+            // Store the new image first.
+            $newAvatarPath = $request
+                ->file('avatar')
+                ->store('avatars', 'public');
+
+            if (!$newAvatarPath) {
+                return response()->json([
+                    'success' => false,
+                    'message' => 'Failed to store the avatar image.',
+                ], 500);
+            }
+        }
+
+        try {
+            // Persist the profile fields and the new avatar path.
+            if ($newAvatarPath !== null) {
+                $validated['avatar'] = $newAvatarPath;
+            }
+
+            $user->update($validated);
+        } catch (\Throwable $exception) {
+            // Clean up the newly stored file if the database update fails.
+            if ($newAvatarPath !== null) {
+                Storage::disk('public')->delete($newAvatarPath);
+            }
+
+            throw $exception;
+        }
+
+        // Delete the previous locally stored avatar after a successful update.
+        if (
+            $newAvatarPath !== null &&
+            is_string($oldAvatar) &&
+            $oldAvatar !== '' &&
+            !preg_match('/^https?:\/\//i', $oldAvatar) &&
+            Storage::disk('public')->exists($oldAvatar)
+        ) {
+            Storage::disk('public')->delete($oldAvatar);
+        }
+
+        $user->refresh();
+        $user->load(['roles.permissions']);
 
         return response()->json([
             'success' => true,
