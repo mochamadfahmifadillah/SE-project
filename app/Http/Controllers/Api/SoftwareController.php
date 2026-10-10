@@ -12,14 +12,23 @@ class SoftwareController extends Controller
     /**
      * GET /api/v1/software
      *
-     * Get active software with optional filters.
+     * Get active software with optional filters,
+     * including active features and integrations.
      */
     public function index(Request $request): JsonResponse
     {
         $query = Software::query()
-            ->where('is_active', true);
+            ->where('is_active', true)
+            ->with([
+                'features' => function ($query) {
+                    $query->where('software_features.is_active', true);
+                },
+                'integrations' => function ($query) {
+                    $query->where('integrations.is_active', true);
+                },
+            ]);
 
-        // Search by software name, category, or description
+        // Search by software name, category, or description.
         if ($request->filled('search')) {
             $search = $request->input('search');
 
@@ -30,7 +39,7 @@ class SoftwareController extends Controller
             });
         }
 
-        // Filter by category
+        // Filter by category.
         if (
             $request->filled('category') &&
             $request->input('category') !== 'All'
@@ -54,13 +63,22 @@ class SoftwareController extends Controller
     /**
      * GET /api/v1/software/{slug}
      *
-     * Get software detail by slug.
+     * Get software details by slug,
+     * including active features and integrations.
      */
     public function show(string $slug): JsonResponse
     {
         $software = Software::query()
             ->where('slug', $slug)
             ->where('is_active', true)
+            ->with([
+                'features' => function ($query) {
+                    $query->where('software_features.is_active', true);
+                },
+                'integrations' => function ($query) {
+                    $query->where('integrations.is_active', true);
+                },
+            ])
             ->first();
 
         if (!$software) {
