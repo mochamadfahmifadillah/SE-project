@@ -5,14 +5,44 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Role;
 use App\Models\User;
+use Cloudinary\Cloudinary;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Hash;
+use Illuminate\Support\Facades\Log;
 use Illuminate\Support\Facades\Storage;
 use Illuminate\Validation\ValidationException;
+use Throwable;
 
 class AuthController extends Controller
 {
+    /**
+     * Create a Cloudinary client using server-side credentials.
+     */
+    private function cloudinary(): Cloudinary
+    {
+        $cloudName = config('services.cloudinary.cloud_name');
+        $apiKey = config('services.cloudinary.api_key');
+        $apiSecret = config('services.cloudinary.api_secret');
+
+        if (!$cloudName || !$apiKey || !$apiSecret) {
+            throw new \RuntimeException(
+                'Cloudinary credentials are not configured.'
+            );
+        }
+
+        return new Cloudinary([
+            'cloud' => [
+                'cloud_name' => $cloudName,
+                'api_key' => $apiKey,
+                'api_secret' => $apiSecret,
+            ],
+            'url' => [
+                'secure' => true,
+            ],
+        ]);
+    }
+
     /**
      * POST /api/v1/register
      *
@@ -22,7 +52,12 @@ class AuthController extends Controller
     {
         $validated = $request->validate([
             'name' => ['required', 'string', 'max:255'],
-            'email' => ['required', 'email', 'max:255', 'unique:users,email'],
+            'email' => [
+                'required',
+                'email',
+                'max:255',
+                'unique:users,email',
+            ],
             'password' => ['required', 'string', 'min:8', 'confirmed'],
         ]);
 
@@ -32,13 +67,10 @@ class AuthController extends Controller
             'password' => $validated['password'],
         ]);
 
-        // Assign the default user role.
         $userRole = Role::where('name', 'user')->first();
 
         if ($userRole) {
-            $user->roles()->syncWithoutDetaching([
-                $userRole->id,
-            ]);
+            $user->roles()->syncWithoutDetaching([$userRole->id]);
         }
 
         $user->load(['roles.permissions']);
@@ -84,7 +116,7 @@ class AuthController extends Controller
             ]);
         }
 
-        // Invalidate previous access tokens.
+        // Preserve the existing token invalidation behavior.
         $user->tokens()->delete();
 
         $user->load(['roles.permissions']);
@@ -143,10 +175,9 @@ class AuthController extends Controller
     /**
      * PATCH /api/v1/me
      *
-     * Update profile details and optionally upload a profile avatar.
+     * Update profile details and optionally upload an avatar to Cloudinary.
      *
-     * Avatar files are stored on Laravel's public disk.
-     * The database stores a relative path, e.g. avatars/example.jpg.
+     * The users.avatar column stores the Cloudinary secure URL.
      */
     public function updateProfile(Request $request): JsonResponse
     {
@@ -171,51 +202,110 @@ class AuthController extends Controller
             ],
         ]);
 
-        // Keep the current avatar unless a new file is uploaded.
+        // Do not attempt to save the uploaded file as a regular profile field.
         unset($validated['avatar']);
 
         $oldAvatar = $user->avatar;
-        $newAvatarPath = null;
+        $newAvatarUrl = null;
+        $newAvatarPublicId = null;
+        $cloudinaryClient = null;
 
+        /*
+         * Upload the new image before updating the database.
+         */
         if ($request->hasFile('avatar')) {
-            // Store the new image first.
-            $newAvatarPath = $request
-                ->file('avatar')
-                ->store('avatars', 'public');
+            try {
+                $cloudinaryClient = $this->cloudinary();
 
-            if (!$newAvatarPath) {
+                $uploadResult = $cloudinaryClient
+                    ->uploadApi()
+                    ->upload(
+                        $request->file('avatar')->getRealPath(),
+                        [
+                            'folder' => 'software-empire/avatars',
+                            'resource_type' => 'image',
+                        ]
+                    );
+
+                $newAvatarUrl = $uploadResult['secure_url'] ?? null;
+                $newAvatarPublicId = $uploadResult['public_id'] ?? null;
+
+                if (
+                    !is_string($newAvatarUrl) ||
+                    !filter_var($newAvatarUrl, FILTER_VALIDATE_URL) ||
+                    !is_string($newAvatarPublicId) ||
+                    $newAvatarPublicId === ''
+                ) {
+                    throw new \RuntimeException(
+                        'Cloudinary did not return a valid image URL and public ID.'
+                    );
+                }
+            } catch (Throwable $exception) {
+                Log::error('Cloudinary avatar upload failed.', [
+                    'user_id' => $user->id,
+                    'error' => $exception->getMessage(),
+                ]);
+
                 return response()->json([
                     'success' => false,
-                    'message' => 'Failed to store the avatar image.',
+                    'message' => 'Failed to upload avatar. Please try again.',
                 ], 500);
             }
         }
 
+        /*
+         * Save profile changes and the new Cloudinary URL.
+         */
         try {
-            // Persist the profile fields and the new avatar path.
-            if ($newAvatarPath !== null) {
-                $validated['avatar'] = $newAvatarPath;
+            if ($newAvatarUrl !== null) {
+                $validated['avatar'] = $newAvatarUrl;
             }
 
             $user->update($validated);
-        } catch (\Throwable $exception) {
-            // Clean up the newly stored file if the database update fails.
-            if ($newAvatarPath !== null) {
-                Storage::disk('public')->delete($newAvatarPath);
+        } catch (Throwable $exception) {
+            // Remove the newly uploaded image if the database update fails.
+            if ($newAvatarPublicId !== null && $cloudinaryClient !== null) {
+                try {
+                    $cloudinaryClient
+                        ->uploadApi()
+                        ->destroy($newAvatarPublicId, [
+                            'resource_type' => 'image',
+                        ]);
+                } catch (Throwable $cleanupException) {
+                    Log::warning(
+                        'Failed to clean up an unused Cloudinary avatar.',
+                        [
+                            'user_id' => $user->id,
+                            'public_id' => $newAvatarPublicId,
+                            'error' => $cleanupException->getMessage(),
+                        ]
+                    );
+                }
             }
 
             throw $exception;
         }
 
-        // Delete the previous locally stored avatar after a successful update.
+        /*
+         * Delete the previous avatar only if it is a legacy local file.
+         * Never pass a Cloudinary URL to Laravel's local storage disk.
+         */
         if (
-            $newAvatarPath !== null &&
+            $newAvatarUrl !== null &&
             is_string($oldAvatar) &&
             $oldAvatar !== '' &&
-            !preg_match('/^https?:\/\//i', $oldAvatar) &&
-            Storage::disk('public')->exists($oldAvatar)
+            !preg_match('/^https?:\/\//i', $oldAvatar)
         ) {
-            Storage::disk('public')->delete($oldAvatar);
+            try {
+                if (Storage::disk('public')->exists($oldAvatar)) {
+                    Storage::disk('public')->delete($oldAvatar);
+                }
+            } catch (Throwable $exception) {
+                Log::warning('Failed to delete the previous local avatar.', [
+                    'user_id' => $user->id,
+                    'error' => $exception->getMessage(),
+                ]);
+            }
         }
 
         $user->refresh();
