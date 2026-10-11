@@ -45,8 +45,6 @@ class AuthController extends Controller
 
     /**
      * POST /api/v1/register
-     *
-     * Register a new user.
      */
     public function register(Request $request): JsonResponse
     {
@@ -58,7 +56,12 @@ class AuthController extends Controller
                 'max:255',
                 'unique:users,email',
             ],
-            'password' => ['required', 'string', 'min:8', 'confirmed'],
+            'password' => [
+                'required',
+                'string',
+                'min:8',
+                'confirmed',
+            ],
         ]);
 
         $user = User::create([
@@ -91,8 +94,6 @@ class AuthController extends Controller
 
     /**
      * POST /api/v1/login
-     *
-     * Authenticate a user and create an access token.
      */
     public function login(Request $request): JsonResponse
     {
@@ -137,13 +138,10 @@ class AuthController extends Controller
 
     /**
      * POST /api/v1/logout
-     *
-     * Revoke the current access token.
      */
     public function logout(Request $request): JsonResponse
     {
-        $request
-            ->user()
+        $request->user()
             ?->currentAccessToken()
             ?->delete();
 
@@ -155,8 +153,6 @@ class AuthController extends Controller
 
     /**
      * GET /api/v1/me
-     *
-     * Return the authenticated user with roles and permissions.
      */
     public function me(Request $request): JsonResponse
     {
@@ -175,9 +171,9 @@ class AuthController extends Controller
     /**
      * PATCH /api/v1/me
      *
-     * Update profile details and optionally upload an avatar to Cloudinary.
-     *
-     * The users.avatar column stores the Cloudinary secure URL.
+     * Update the authenticated user's profile.
+     * Uploaded avatars are stored on Cloudinary.
+     * The users.avatar column stores the secure image URL.
      */
     public function updateProfile(Request $request): JsonResponse
     {
@@ -202,7 +198,7 @@ class AuthController extends Controller
             ],
         ]);
 
-        // Do not attempt to save the uploaded file as a regular profile field.
+        // Avatar is uploaded separately, not saved as a file object.
         unset($validated['avatar']);
 
         $oldAvatar = $user->avatar;
@@ -211,16 +207,25 @@ class AuthController extends Controller
         $cloudinaryClient = null;
 
         /*
-         * Upload the new image before updating the database.
+         * Upload the new avatar before updating the database.
          */
         if ($request->hasFile('avatar')) {
             try {
+                $file = $request->file('avatar');
+
+                if (!$file->isValid()) {
+                    return response()->json([
+                        'success' => false,
+                        'message' => 'The uploaded avatar is invalid.',
+                    ], 422);
+                }
+
                 $cloudinaryClient = $this->cloudinary();
 
                 $uploadResult = $cloudinaryClient
                     ->uploadApi()
                     ->upload(
-                        $request->file('avatar')->getRealPath(),
+                        $file->getRealPath(),
                         [
                             'folder' => 'software-empire/avatars',
                             'resource_type' => 'image',
@@ -237,12 +242,13 @@ class AuthController extends Controller
                     $newAvatarPublicId === ''
                 ) {
                     throw new \RuntimeException(
-                        'Cloudinary did not return a valid image URL and public ID.'
+                        'Cloudinary returned an invalid upload response.'
                     );
                 }
             } catch (Throwable $exception) {
                 Log::error('Cloudinary avatar upload failed.', [
                     'user_id' => $user->id,
+                    'exception_class' => get_class($exception),
                     'error' => $exception->getMessage(),
                 ]);
 
@@ -254,16 +260,17 @@ class AuthController extends Controller
         }
 
         /*
-         * Save profile changes and the new Cloudinary URL.
+         * Save the profile and the Cloudinary URL.
          */
         try {
             if ($newAvatarUrl !== null) {
                 $validated['avatar'] = $newAvatarUrl;
             }
 
-            $user->update($validated);
+            $user->fill($validated);
+            $user->save();
         } catch (Throwable $exception) {
-            // Remove the newly uploaded image if the database update fails.
+            // Delete the newly uploaded image if saving the database fails.
             if ($newAvatarPublicId !== null && $cloudinaryClient !== null) {
                 try {
                     $cloudinaryClient
@@ -283,22 +290,41 @@ class AuthController extends Controller
                 }
             }
 
-            throw $exception;
+            Log::error('Profile database update failed.', [
+                'user_id' => $user->id,
+                'exception_class' => get_class($exception),
+                'error' => $exception->getMessage(),
+            ]);
+
+            return response()->json([
+                'success' => false,
+                'message' => 'Failed to update profile. Please try again.',
+            ], 500);
         }
 
         /*
-         * Delete the previous avatar only if it is a legacy local file.
+         * Delete an old local avatar only after the database update succeeds.
          * Never pass a Cloudinary URL to Laravel's local storage disk.
          */
         if (
             $newAvatarUrl !== null &&
             is_string($oldAvatar) &&
             $oldAvatar !== '' &&
-            !preg_match('/^https?:\/\//i', $oldAvatar)
+            !preg_match('~^https?://~i', $oldAvatar)
         ) {
             try {
-                if (Storage::disk('public')->exists($oldAvatar)) {
-                    Storage::disk('public')->delete($oldAvatar);
+                $oldPath = ltrim($oldAvatar, '/');
+
+                if (str_starts_with($oldPath, 'storage/')) {
+                    $oldPath = substr($oldPath, strlen('storage/'));
+                }
+
+                if (
+                    $oldPath !== '' &&
+                    !str_contains($oldPath, '..') &&
+                    Storage::disk('public')->exists($oldPath)
+                ) {
+                    Storage::disk('public')->delete($oldPath);
                 }
             } catch (Throwable $exception) {
                 Log::warning('Failed to delete the previous local avatar.', [
