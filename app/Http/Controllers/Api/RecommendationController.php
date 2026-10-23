@@ -12,128 +12,213 @@ class RecommendationController extends Controller
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
-            'business_size' => ['required', 'string'],
-            'primary_need' => ['required', 'string'],
-            'budget' => ['required', 'string'],
+            'business_type' => ['nullable', 'string'],
+            'business_size' => ['nullable', 'string'],
+            'industry' => ['nullable', 'string'],
+            'primary_need' => ['nullable', 'string'],
+            'must_have_features' => ['sometimes', 'array'],
+            'must_have_features.*' => ['string'],
+            'budget' => ['nullable', 'string'],
+            'team_size' => ['nullable', 'string'],
+            'integrations' => ['sometimes', 'array'],
+            'integrations.*' => ['string'],
         ]);
+
+        // Abaikan jawaban kosong untuk proses scoring.
+        $answers = array_filter(
+            $validated,
+            static function ($value) {
+                if (is_array($value)) {
+                    return count($value) > 0;
+                }
+
+                return $value !== null
+                    && trim((string) $value) !== '';
+            }
+        );
+
+        $categoryMap = [
+            'Sales & CRM' => 'CRM',
+            'Finance & ERP' => 'ERP',
+            'HR & People' => 'HR',
+            'Operations' => 'Operations',
+        ];
 
         $software = Software::query()
             ->where('is_active', true)
+            ->with([
+                'features' => fn ($query) => $query
+                    ->where('software_features.is_active', true),
+                'integrations' => fn ($query) => $query
+                    ->where('integrations.is_active', true),
+            ])
             ->get();
 
-        $recommendations = $software->map(function ($item) use ($validated) {
-            $score = 0;
+        $recommendations = $software->map(function ($item) use (
+            $answers,
+            $categoryMap
+        ) {
+            $earnedPoints = 0.0;
+            $availablePoints = 0;
 
             /*
-             * PRIMARY NEED
+             * Primary need: 40 poin.
              */
-            $categoryMap = [
-                'Sales & CRM' => 'CRM',
-                'Finance & ERP' => 'ERP',
-                'HR & People' => 'HR',
-                'Operations' => 'Operations',
-            ];
+            if (isset($answers['primary_need'])) {
+                $expectedCategory =
+                    $categoryMap[$answers['primary_need']] ?? null;
+
+                if ($expectedCategory !== null) {
+                    $availablePoints += 40;
+
+                    if ($item->category === $expectedCategory) {
+                        $earnedPoints += 40;
+                    }
+                }
+            }
+
+            /*
+             * Business size: 30 poin.
+             */
+            if (isset($answers['business_size'])) {
+                $businessSize = $answers['business_size'];
+
+                $sizePoints = match ($businessSize) {
+                    '500+' => $item->tag === 'Enterprise' ? 30 : 15,
+                    '101–500' => $item->tag === 'Enterprise' ? 25 : 15,
+                    '21–100' => in_array(
+                        $item->tag,
+                        ['SMB', 'Popular'],
+                        true
+                    ) ? 25 : 15,
+                    default => in_array(
+                        $item->tag,
+                        ['SMB', 'Best Value'],
+                        true
+                    ) ? 30 : 15,
+                };
+
+                $availablePoints += 30;
+                $earnedPoints += $sizePoints;
+            }
+
+            /*
+             * Budget: 30 poin.
+             */
+            if (isset($answers['budget'])) {
+                $budget = $answers['budget'];
+                $price = strtolower(trim($item->price ?? ''));
+
+                $budgetPoints = match ($budget) {
+                    'Free / low cost' => str_contains($price, 'free')
+                        ? 30
+                        : ($this->priceFitsBudget($price, 0, 30) ? 20 : 5),
+
+                    '$10–30 per user' => $this->priceFitsBudget(
+                        $price, 10, 30
+                    ) ? 30 : 10,
+
+                    '$30–75 per user' => $this->priceFitsBudget(
+                        $price, 30, 75
+                    ) ? 30 : 15,
+
+                    '$75+ per user' => $this->priceFitsBudget(
+                        $price, 75, null
+                    ) ? 30 : 10,
+
+                    default => null,
+                };
+
+                if ($budgetPoints !== null) {
+                    $availablePoints += 30;
+                    $earnedPoints += $budgetPoints;
+                }
+            }
+
+            /*
+             * Must-have features: 20 poin.
+             * Hanya dinilai jika data fitur software tersedia.
+             */
+            $selectedFeatures = $answers['must_have_features'] ?? [];
 
             if (
-                isset($categoryMap[$validated['primary_need']]) &&
-                $item->category === $categoryMap[$validated['primary_need']]
+                count($selectedFeatures) > 0
+                && $item->features->isNotEmpty()
             ) {
-                $score += 40;
-            }
+                $availablePoints += 20;
 
-            /*
-             * BUSINESS SIZE
-             *
-             * Enterprise-oriented software mendapat score
-             * lebih tinggi untuk perusahaan besar.
-             */
-            $businessSize = $validated['business_size'];
+                $softwareFeatures = $item->features
+                    ->flatMap(fn ($feature) => [
+                        $this->normalizeValue($feature->name),
+                        $this->normalizeValue($feature->slug),
+                    ])
+                    ->filter()
+                    ->unique();
 
-            if ($businessSize === '500+') {
-                if ($item->tag === 'Enterprise') {
-                    $score += 30;
-                } else {
-                    $score += 15;
-                }
-            } elseif ($businessSize === '101–500') {
-                if ($item->tag === 'Enterprise') {
-                    $score += 25;
-                } else {
-                    $score += 15;
-                }
-            } elseif ($businessSize === '21–100') {
-                if ($item->tag === 'SMB' || $item->tag === 'Popular') {
-                    $score += 25;
-                } else {
-                    $score += 15;
-                }
-            } else {
-                if ($item->tag === 'SMB' || $item->tag === 'Best Value') {
-                    $score += 30;
-                } else {
-                    $score += 15;
+                $matchedFeatures = collect($selectedFeatures)
+                    ->map(fn ($value) => $this->normalizeValue($value))
+                    ->filter(fn ($value) => $value !== '')
+                    ->intersect($softwareFeatures)
+                    ->unique()
+                    ->count();
+
+                $totalSelected = collect($selectedFeatures)
+                    ->map(fn ($value) => $this->normalizeValue($value))
+                    ->filter(fn ($value) => $value !== '')
+                    ->unique()
+                    ->count();
+
+                if ($totalSelected > 0) {
+                    $earnedPoints += 20
+                        * ($matchedFeatures / $totalSelected);
                 }
             }
 
             /*
-             * BUDGET
+             * Integrations: 10 poin.
+             * Hanya dinilai jika data integrasi software tersedia.
              */
-            $budget = $validated['budget'];
+            $selectedIntegrations = $answers['integrations'] ?? [];
 
-            $price = strtolower($item->price ?? '');
+            if (
+                count($selectedIntegrations) > 0
+                && $item->integrations->isNotEmpty()
+            ) {
+                $availablePoints += 10;
 
-            if ($budget === 'Free / low cost') {
-                if (str_contains($price, 'free')) {
-                    $score += 30;
-                } elseif (
-                    str_contains($price, '$8') ||
-                    str_contains($price, '$10') ||
-                    str_contains($price, '$20')
-                ) {
-                    $score += 20;
-                } else {
-                    $score += 5;
-                }
-            } elseif ($budget === '$10–30 per user') {
-                if (
-                    str_contains($price, '$10') ||
-                    str_contains($price, '$20') ||
-                    str_contains($price, '$24') ||
-                    str_contains($price, '$25')
-                ) {
-                    $score += 30;
-                } else {
-                    $score += 10;
-                }
-            } elseif ($budget === '$30–75 per user') {
-                if (
-                    str_contains($price, '$65') ||
-                    str_contains($price, '$75')
-                ) {
-                    $score += 30;
-                } else {
-                    $score += 15;
-                }
-            } elseif ($budget === '$75+ per user') {
-                if (
-                    str_contains($price, '$75') ||
-                    str_contains($price, '$100') ||
-                    str_contains($price, '$150')
-                ) {
-                    $score += 30;
-                } else {
-                    $score += 10;
+                $softwareIntegrations = $item->integrations
+                    ->map(fn ($integration) =>
+                        $this->normalizeValue($integration->name)
+                    )
+                    ->filter()
+                    ->unique();
+
+                $normalizedSelections = collect($selectedIntegrations)
+                    ->map(fn ($value) => $this->normalizeValue($value))
+                    ->filter()
+                    ->unique();
+
+                $matchedIntegrations = $normalizedSelections
+                    ->intersect($softwareIntegrations)
+                    ->count();
+
+                if ($normalizedSelections->isNotEmpty()) {
+                    $earnedPoints += 10 * (
+                        $matchedIntegrations
+                        / $normalizedSelections->count()
+                    );
                 }
             }
 
             /*
-             * BASE RATING
-             *
-             * Rating memberikan sedikit tambahan score
-             * supaya software dengan rating tinggi
-             * punya posisi lebih baik ketika score utama sama.
+             * Jangan menghasilkan skor jika tidak ada
+             * kriteria yang benar-benar bisa dinilai.
              */
-            $score += ((float) $item->rating) * 2;
+            $matchScore = $availablePoints > 0
+                ? (int) round(
+                    ($earnedPoints / $availablePoints) * 100
+                )
+                : null;
 
             return [
                 'id' => $item->id,
@@ -146,12 +231,45 @@ class RecommendationController extends Controller
                 'tag' => $item->tag,
                 'description' => $item->description,
                 'views' => $item->views,
-                'match_score' => min(100, $score),
+                'match_score' => $matchScore,
+                'features' => $item->features
+                    ->map(fn ($feature) => [
+                        'id' => $feature->id,
+                        'name' => $feature->name,
+                        'slug' => $feature->slug,
+                    ])
+                    ->values(),
+                'integrations' => $item->integrations
+                    ->map(fn ($integration) => [
+                        'id' => $integration->id,
+                        'name' => $integration->name,
+                        'description' => $integration->description,
+                        'url' => $integration->url,
+                    ])
+                    ->values(),
             ];
         });
 
         $recommendations = $recommendations
-            ->sortByDesc('match_score')
+            ->sort(function ($a, $b) {
+                if ($a['match_score'] === null) {
+                    if ($b['match_score'] !== null) {
+                        return 1;
+                    }
+                } elseif ($b['match_score'] === null) {
+                    return -1;
+                } else {
+                    $comparison =
+                        $b['match_score'] <=> $a['match_score'];
+
+                    if ($comparison !== 0) {
+                        return $comparison;
+                    }
+                }
+
+                return (float) ($b['rating'] ?? 0)
+                    <=> (float) ($a['rating'] ?? 0);
+            })
             ->values()
             ->take(3);
 
@@ -163,5 +281,31 @@ class RecommendationController extends Controller
                 'recommendations' => $recommendations,
             ],
         ]);
+    }
+
+    private function normalizeValue(?string $value): string
+    {
+        return strtolower(
+            preg_replace('/[^a-z0-9]/i', '', trim($value ?? ''))
+        );
+    }
+
+    private function priceFitsBudget(
+        string $price,
+        float $minimum,
+        ?float $maximum
+    ): bool {
+        if (
+            $price === ''
+            || str_contains($price, 'free')
+            || !preg_match('/\$\s*(\d+(?:\.\d+)?)/', $price, $matches)
+        ) {
+            return false;
+        }
+
+        $amount = (float) $matches[1];
+
+        return $amount >= $minimum
+            && ($maximum === null || $amount <= $maximum);
     }
 }

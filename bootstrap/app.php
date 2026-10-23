@@ -16,17 +16,14 @@ return Application::configure(basePath: dirname(__DIR__))
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        // Tangani CORS secara global, termasuk request preflight OPTIONS.
         $middleware->prepend(HandleCors::class);
 
-        // Alias middleware untuk role dan permission.
         $middleware->alias([
             'role' => RoleMiddleware::class,
             'permission' => PermissionMiddleware::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        // Pastikan error dari endpoint API dikembalikan sebagai JSON.
         $exceptions->shouldRenderJsonWhen(
             fn (Request $request): bool =>
                 $request->is('api/*') ||

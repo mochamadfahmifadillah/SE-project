@@ -851,4 +851,26 @@ Route::prefix('v1')->group(function () {
                     ->name('reviews.destroy');
             });
     });
+  Route::get('/debug-db', function () {
+    return response()->json([
+        'base_path' => base_path(),
+        'env_file' => app()->environmentFilePath(),
+        'environment' => app()->environment(),
+        'config_cached' => app()->configurationIsCached(),
+
+        'default_connection' => config('database.default'),
+
+        'pgsql_host' => config('database.connections.pgsql.host'),
+        'pgsql_database' => config('database.connections.pgsql.database'),
+        'pgsql_username' => config('database.connections.pgsql.username'),
+
+        'default_host' => config(
+            'database.connections.' . config('database.default') . '.host'
+        ),
+
+        'default_username' => config(
+            'database.connections.' . config('database.default') . '.username'
+        ),
+    ]);
+});
 });
